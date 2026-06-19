@@ -55,9 +55,13 @@ pico_enable_stdio_usb(AutoCatFeeder 1)
 target_link_libraries(AutoCatFeeder
         pico_stdlib)
 
+# Add submodules to my project
+add_subdirectory(extern/hx711-pico-c)
+
 # Add the standard include files to the build
 target_include_directories(AutoCatFeeder PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
+        extern/hx711-pico-c/include
 )
 
 # Add any user requested libraries
@@ -65,6 +69,7 @@ target_link_libraries(AutoCatFeeder
         pico_cyw43_arch_lwip_threadsafe_background
         pico_lwip_http
         pico_stdlib
+        hx711-pico-c
         )
 
 # Need to generate UF2 file for upload to RP2040
