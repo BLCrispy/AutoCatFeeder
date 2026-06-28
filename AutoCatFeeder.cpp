@@ -3,75 +3,98 @@
 #include "pico/cyw43_arch.h"
 #include "lwipopts.h"
 #include "lwip/apps/httpd.h"
+#include "lwip/tcp.h"
+#include <string.h>
+#include <stdlib.h>
+#include "pico/multicore.h"
 
 extern "C"
 {
 #include "extern/hx711-pico-c/include/common.h"
 }
 
-// CGI handler which is run when a request for /led.cgi is detected
-const char *cgi_led_handler(int iIndex, int iNumParams, char *pcParam[], char *pcValue[])
-{
-    for (int i = 0; i < iNumParams; i++)
-    {
-        // Check if an request for LED has been made (/led.cgi?led=x)
-        if (strcmp(pcParam[i], "led") == 0)
-        {
-            // Look at the argument to check if LED is to be turned on (x=1) or off (x=0)
-            if (strcmp(pcValue[i], "0") == 0)
-                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-            else if (strcmp(pcValue[i], "1") == 0)
-                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-        }
-    }
-    return "/status.shtml"; // Send the status.shtml file back to the client after the CGI request has been processed
-}
+// ---------------------------------------------------------
+// Global State
+// ---------------------------------------------------------
+// Sets global value for what portion size is
+volatile bool feed_triggered = false;
+volatile bool first_reading = true;
+volatile int8_t portion_size = 40; // 40g default as that is what we feed our cats per meal usually
+volatile int32_t smoothed_value = 0;
 
-// tCGI Struct
-// Fill this with all of the CGI requests and their respective handlers
-static const tCGI cgi_handlers[] = {
-    {// Html request for "/led.cgi" triggers cgi_handler
-     "/led.cgi", cgi_led_handler},
-};
 
-void cgi_init(void)
-{
-    http_set_cgi_handlers(cgi_handlers, 1);
-}
+// ---------------------------------------------------------
+// SSI Handler
+// ---------------------------------------------------------
 
-// Set SSI tags
-const char *ssi_tags[] = {"led"};
+// SSI tags must match exactly what's in status.shtml
+const char *ssi_tags[] = {"portion", "feed"};
 
 u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen)
 {
-    int printed; // size_t to hold the number of characters we inject (ensures 32-bit unsigned int)
-
+    int printed = 0;
     if (iIndex == 0)
-    {
-        // Read the state of the LED (on or off)
-        bool is_on = cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN);
-
-        // Write '1' or '0' into the pcInsert buffer, which injects it into the file
-        printed = snprintf(pcInsert, iInsertLen, "%d", is_on ? 1 : 0);
-
-        if (printed < 0)
-        {
-            // If there was an error during snprintf, return 0 to indicate that we didn't inject anything
-            return 0;
-        }
-
-        // Return the number of characters that we injected
-        return (u16_t)printed;
-    }
-
-    // Return 0 if we didn't inject anything
-    return 0;
+        printed = snprintf(pcInsert, iInsertLen, "%d", (int)portion_size);
+    else if (iIndex == 1)
+        printed = snprintf(pcInsert, iInsertLen, "%d", (int)feed_triggered);
+    if (printed < 0) return 0;
+    return (u16_t)printed;
 }
 
 void ssi_init()
 {
-    // Configure SSI handler
     http_set_ssi_handler(ssi_handler, ssi_tags, LWIP_ARRAYSIZE(ssi_tags));
+}
+
+// ---------------------------------------------------------
+// CGI Handlers
+// ---------------------------------------------------------
+
+// CGI handler for manually dispensing food
+// Expects URL format: /snack.cgi?snack=x where x is 0 or 1
+const char *cgi_feed_handler(int iIndex, int iNumParams, char *pcParam[], char *pcValue[])
+{
+    for (int i = 0; i < iNumParams; i++)
+    {
+        if (strcmp(pcParam[i], "on") == 0)
+        {
+            if (strcmp(pcValue[i], "1") == 0 && !feed_triggered)
+            {
+                feed_triggered = true;
+                printf("Feed triggered!\n");
+            }
+            // on=0 is acknowledged but ignored — dispensing completes naturally
+            // feed_triggered resets itself at end of dispenseFood()
+        }
+    }
+    return "/index.html";
+}
+
+// CGI handler for Portion Size Requests
+// Expects URL format: /schedule.cgi?id=0&time=14
+const char *cgi_portion_handler(int iIndex, int iNumParams, char *pcParam[], char *pcValue[])
+{
+    for (int i = 0; i < iNumParams; i++)
+    {
+        if (strcmp(pcParam[i], "grams") == 0)
+        {
+            portion_size = (int8_t)atoi(pcValue[i]);
+            printf("Portion update: %d g\n", portion_size);
+        }
+    }
+
+    return "/index.html";
+}
+
+// CGI handler table
+static const tCGI cgi_handlers[] = {
+    {"/feed.cgi", cgi_feed_handler},
+    {"/portion.cgi", cgi_portion_handler}};
+
+// CGI Initialization
+void cgi_init(void)
+{
+    http_set_cgi_handlers(cgi_handlers, LWIP_ARRAYSIZE(cgi_handlers));
 }
 
 // HX711 Load Cell Amplifier Setup and global hx declaration
@@ -115,7 +138,7 @@ void hx711_setup()
     // You can now...
 }
 
-void hx711_read_EMA(bool first_reading, int32_t &smoothed_value)
+void hx711_read_EMA()
 {
     // Val to hold the raw reading from the sensor
     int32_t val;
@@ -132,7 +155,7 @@ void hx711_read_EMA(bool first_reading, int32_t &smoothed_value)
         {
             // The EMA Formula: 10% new reading, 90% old average
             // This acts as a shock absorber for the data
-            smoothed_value = (val * 0.2f) + (smoothed_value * 0.8f);
+            smoothed_value = (int32_t)((val * 0.2f) + ((float)smoothed_value * 0.8f));
         }
 
         printf("Raw: %li | Smoothed: %li\n", val, smoothed_value);
@@ -141,46 +164,73 @@ void hx711_read_EMA(bool first_reading, int32_t &smoothed_value)
         // This prevents the Pico W from overwhelming the sensor
         sleep_ms(100);
     }
-    else {
+    else
+    {
         printf("Failed to read value from HX711 within timeout.\n");
     }
 }
 
-#define TARGET_WEIGHT 500 // Target weight in grams
+// Runs food dispensing logic
 #define CALIBRATION_FACTOR 440 // Calibration factor to convert raw sensor values to grams
-void dispenseFood(int32_t &smoothed_value) {
-    // This function will eventually control a servo motor to dispense food
-    // For now, it's just a placeholder to show where that code will go
-
+#define MOTOR_PIN 2 // GPIO pin connected to SONGLE Relay Pin to send triggers to motor
+void dispenseFood()
+{
     int32_t tare = smoothed_value; // Set the tare to the current weight before dispensing
 
-    while ((smoothed_value - tare) < TARGET_WEIGHT * CALIBRATION_FACTOR) {
-        hx711_read_EMA(false, smoothed_value); // Update the smoothed value
+    // Dispenses food until the target weight of food has been met
+    // FIX-ME: Needs to have motor control logic implemented
+    while ((smoothed_value - tare) < (int32_t)portion_size * CALIBRATION_FACTOR)
+    {
+        hx711_read_EMA(); // Update the smoothed value
         printf("Dispensing... Current weight: %li g\n", (smoothed_value - tare) / CALIBRATION_FACTOR);
+        gpio_put(MOTOR_PIN, 0); // Turn motor on to start dispensing food
     }
 
     printf("Target weight reached. Stopping dispensing.\n");
-    printf("Waiting for scale to settle...\n");
+    gpio_put(MOTOR_PIN, 1); // Turn motor off after portion_size met
+
     // Actively read the sensor for 2 seconds instead of freezing.
     // This flushes out the HX711 hardware buffer and catches your finger lifting in real-time.
+    printf("Waiting for scale to settle...\n");
     int32_t flush_val;
-    for (int i = 0; i < 20; i++) { 
+    for (int i = 0; i < 20; i++)
+    {
         hx711_get_value_timeout(&hx, &flush_val, 250000);
         sleep_ms(100); // Matches the 10Hz rate
     }
 
-
     int32_t fresh_raw_baseline = 0;
-    if (hx711_get_value_timeout(&hx, &fresh_raw_baseline, 250000)) {
+    if (hx711_get_value_timeout(&hx, &fresh_raw_baseline, 250000))
+    {
         smoothed_value = fresh_raw_baseline; // Reset the smoothed value to the new baseline after dispensing
         printf("Post-dispense raw baseline: %li\n", fresh_raw_baseline);
-    } 
+    }
 }
 
-int core1_main()
+void core1_main()
 {
+    
 
-    return 0;
+    // Initialize the HX711 load cell amplifier and set it up to read values from the load cell
+    hx711_setup();
+
+    
+
+    // Runs first reading and sets it to false to start taking EMA readings.
+    hx711_read_EMA();
+    first_reading = false;
+
+    while (true)
+    {
+        hx711_read_EMA();
+        // Core 1 watches for trigger set by cgi_feed_handler in core0 to run dispense food action then reset trigger
+        if (feed_triggered)
+        {
+            dispenseFood();
+            feed_triggered = false;
+        }
+        sleep_ms(100); // Sleeps sets core1 to check for triggers every 100ms
+    }
 }
 
 int main()
@@ -216,44 +266,37 @@ int main()
     httpd_init();
     printf("Http server initialized.\n");
 
-    // Initialize SSI & CGI
-    ssi_init();
-    printf("SSI Handler initialized.\n");
-
+    // Initialize CGI handlers
     cgi_init();
     printf("CGI Handler initialized.\n");
 
-    // Initialize the HX711 load cell amplifier and set it up to read values from the load cell
-    hx711_setup();
+    // Initialize SSI Handler
+    ssi_init();
+    printf("SSI Handler initialized.\n");
 
-    // Add this outside your while loop to store the running average
-    int32_t smoothed_value = 0;
-    bool first_reading = true;
-    
+    // Create an array to hold the 6 bytes of the MAC address
+    uint8_t mac[6];
 
-    //Test vars
-    int count = 0;
+    // Pull the MAC address from the Wi-Fi chip in Station Mode (STA)
+    cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA, mac);
+
+    // Print it to your serial console
+    printf("Pico W MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    // Initialize and Configure gpio MOTOR_PIN
+    gpio_init(MOTOR_PIN);
+    gpio_put(MOTOR_PIN, 1);
+    gpio_set_dir(MOTOR_PIN, GPIO_OUT);
+
+    multicore_launch_core1(core1_main); // Launch core 1 to run the HX711 reading loop
+
 
     // Loop that just prints hello world and blinks the on-board LED every second
     while (true)
     {
-        if (first_reading) {
-            printf("Performing first reading...\n");
-            hx711_read_EMA(first_reading, smoothed_value);
-            first_reading = false; // Set first_reading to false after the first read
-        }
-        else {
-            hx711_read_EMA(first_reading, smoothed_value);
-        }
-        
-        sleep_ms(1000);
-        if (count == 5)
-        {
-            dispenseFood(smoothed_value);
-            
-            count = 0;
-        }
-        count++;
+        cyw43_arch_poll();                                       // Service the Wi-Fi driver
+        cyw43_arch_wait_for_work_until(make_timeout_time_ms(1)); // Yield briefly
     }
 
     return 0;

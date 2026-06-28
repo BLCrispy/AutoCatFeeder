@@ -16,10 +16,11 @@
 #define MEM_LIBC_MALLOC             0
 #endif
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    4000
-#define MEMP_NUM_TCP_SEG            32
+#define MEM_SIZE                    8000
+#define MEMP_NUM_TCP_PCB            8
+#define MEMP_NUM_TCP_SEG            48
 #define MEMP_NUM_ARP_QUEUE          10
-#define PBUF_POOL_SIZE              24
+#define PBUF_POOL_SIZE              32
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
 #define LWIP_ICMP                   1
@@ -38,7 +39,7 @@
 #define LINK_STATS                  0
 // #define ETH_PAD_SIZE                2
 #define LWIP_CHKSUM_ALGORITHM       3
-#define LWIP_DHCP                   1
+#define LWIP_DHCP                   0
 #define LWIP_IPV4                   1
 #define LWIP_TCP                    1
 #define LWIP_UDP                    1
@@ -90,3 +91,11 @@
 #define LWIP_HTTPD_CGI 1
 #define LWIP_HTTPD_SSI_INCLUDE_TAG 0
 #define HTTPD_FSDATA_FILE "htmldata.c"
+
+
+
+
+// Define your static parameters for Station (STA) Mode
+#define CYW43_DEFAULT_IP_STA_ADDRESS    LWIP_MAKEU32(192, 168, 86, 26)
+#define CYW43_DEFAULT_IP_STA_NETMASK    LWIP_MAKEU32(255, 255, 255, 0)
+#define CYW43_DEFAULT_IP_STA_GATEWAY    LWIP_MAKEU32(192, 168, 86, 1)

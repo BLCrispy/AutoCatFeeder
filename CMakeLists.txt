@@ -70,6 +70,7 @@ target_link_libraries(AutoCatFeeder
         pico_lwip_http
         pico_stdlib
         hx711-pico-c
+        pico_multicore
         )
 
 # Need to generate UF2 file for upload to RP2040
