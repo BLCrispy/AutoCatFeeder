@@ -7,6 +7,13 @@
 #include <string.h>
 #include <stdlib.h>
 #include "pico/multicore.h"
+#include "displaylib/ssd1315.hpp"
+#include "nowifi_icon16x16.h"
+#include "wifi_icon16x16.h"
+#include "hardware/rtc.h"
+#include "pico/util/datetime.h"
+#include "lwip/apps/sntp.h"
+#include <time.h>
 
 extern "C"
 {
@@ -22,6 +29,26 @@ volatile bool first_reading = true;
 volatile int8_t portion_size = 40; // 40g default as that is what we feed our cats per meal usually
 volatile int32_t smoothed_value = 0;
 
+// =============== Function prototypes ================
+// SSI Handlers
+u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen);
+void ssi_init();
+
+// CGI Handlers
+const char *cgi_feed_handler(int iIndex, int iNumParams, char *pcParam[], char *pcValue[]);
+const char *cgi_portion_handler(int iIndex, int iNumParams, char *pcParam[], char *pcValue[]);
+void cgi_init(void);
+
+// HX711 Functions
+void hx711_setup();
+void hx711_read_EMA();
+
+// Runs food dispensing logic
+void dispenseFood();
+
+// OLED Display Functions
+void SetupDisplay(void);
+void updateDisplay(bool wifi_status, int32_t weight);
 
 // ---------------------------------------------------------
 // SSI Handler
@@ -37,7 +64,8 @@ u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen)
         printed = snprintf(pcInsert, iInsertLen, "%d", (int)portion_size);
     else if (iIndex == 1)
         printed = snprintf(pcInsert, iInsertLen, "%d", (int)feed_triggered);
-    if (printed < 0) return 0;
+    if (printed < 0)
+        return 0;
     return (u16_t)printed;
 }
 
@@ -97,6 +125,14 @@ void cgi_init(void)
     http_set_cgi_handlers(cgi_handlers, LWIP_ARRAYSIZE(cgi_handlers));
 }
 
+// ---------------------------------------------------------
+// HX711 Load Cell Amplifier Setup and Reading Functions
+// ---------------------------------------------------------
+
+#define OUTLIER_THRESHOLD_HIGH_DISPENSING         44000   // 100g equivalent
+#define OUTLIER_THRESHOLD_HIGH_IDLE               22000   // 50g equivalent
+#define OUTLIER_THRESHOLD_LOW                    -22000   // -50g equivalent  
+
 // HX711 Load Cell Amplifier Setup and global hx declaration
 hx711_t hx;
 void hx711_setup()
@@ -138,52 +174,74 @@ void hx711_setup()
     // You can now...
 }
 
+
+
 void hx711_read_EMA()
 {
-    // Val to hold the raw reading from the sensor
     int32_t val;
-    // Timeout method of val reading
     if (hx711_get_value_timeout(&hx, &val, 250000))
     {
-
-        // Initialize the average on the very first read
-        if (first_reading)
+        if (first_reading) // If this is the first reading, set the smoothed value to the raw value and return
         {
             smoothed_value = val;
+            first_reading = false;
+            sleep_ms(100);
+            return;
         }
-        else
+
+        int32_t deviation = val - (int32_t)smoothed_value; // signed deviation
+
+        int32_t threshold_high = feed_triggered ? OUTLIER_THRESHOLD_HIGH_DISPENSING : OUTLIER_THRESHOLD_HIGH_IDLE;
+
+        if (deviation > threshold_high || deviation < OUTLIER_THRESHOLD_LOW) // Reject outliers based on thresholds
         {
-            // The EMA Formula: 10% new reading, 90% old average
-            // This acts as a shock absorber for the data
-            smoothed_value = (int32_t)((val * 0.2f) + ((float)smoothed_value * 0.8f));
+            printf("Outlier rejected: %li (deviation: %li)\n", val, deviation);
+            sleep_ms(100);
+            return;
         }
 
+        smoothed_value = (int32_t)((val * 0.1f) + ((float)smoothed_value * 0.9f)); // EMA smoothing with alpha = 0.1
         printf("Raw: %li | Smoothed: %li\n", val, smoothed_value);
-
-        // Keep a short delay to match the HX711's 10Hz sample rate
-        // This prevents the Pico W from overwhelming the sensor
         sleep_ms(100);
     }
-    else
+    else // If the reading times out, print an error message
     {
         printf("Failed to read value from HX711 within timeout.\n");
     }
 }
 
+// ---------------------------------------------------------
+// Food Dispensing Logic
+// ---------------------------------------------------------
+
 // Runs food dispensing logic
 #define CALIBRATION_FACTOR 440 // Calibration factor to convert raw sensor values to grams
-#define MOTOR_PIN 2 // GPIO pin connected to SONGLE Relay Pin to send triggers to motor
+#define MOTOR_PIN 2            // GPIO pin connected to SONGLE Relay Pin to send triggers to motor
 void dispenseFood()
 {
+    // Minimum dispense time in milliseconds based on portion size (40g takes 8 seconds)
+    // This scales dispense time based on portion size, and was calibrated from 40g feedings taking 8 seconds to dispense
+    uint32_t min_dispense_ms = (uint32_t)((portion_size / 40.0f) * 8000);
+    absolute_time_t dispense_start = get_absolute_time(); // Start dispense timer
+    bool min_time_met = false;                            // Flag to track if minimum dispense time has been met
+
     int32_t tare = smoothed_value; // Set the tare to the current weight before dispensing
+
+    gpio_put(MOTOR_PIN, 0); // Turn motor on to start dispensing food      
+
 
     // Dispenses food until the target weight of food has been met
     // FIX-ME: Needs to have motor control logic implemented
-    while ((smoothed_value - tare) < (int32_t)portion_size * CALIBRATION_FACTOR)
+    while (((smoothed_value - tare) < (int32_t)portion_size * CALIBRATION_FACTOR) && !min_time_met)
     {
         hx711_read_EMA(); // Update the smoothed value
         printf("Dispensing... Current weight: %li g\n", (smoothed_value - tare) / CALIBRATION_FACTOR);
-        gpio_put(MOTOR_PIN, 0); // Turn motor on to start dispensing food
+
+                                             
+        updateDisplay(true, (smoothed_value - tare) / CALIBRATION_FACTOR); // Update the OLED display with the latest information
+
+        // Records the time elapsed since dispensing started and checks if the minimum dispense time has been met
+        min_time_met = absolute_time_diff_us(dispense_start, get_absolute_time()) >= ((int64_t)min_dispense_ms * 1000);
     }
 
     printf("Target weight reached. Stopping dispensing.\n");
@@ -207,19 +265,227 @@ void dispenseFood()
     }
 }
 
+// ---------------------------------------------------------
+// SSD1315 OLED Display
+// ---------------------------------------------------------
+
+// Screen settings
+#define myOLEDwidth 128
+#define myOLEDheight 64
+#define myScreenSize (myOLEDwidth * (myOLEDheight / 8)) // eg 1024 bytes = 128 * 64/8
+uint8_t screenBuffer[myScreenSize];
+
+// instantiate  an OLED object
+SSD1315 myOLED(myOLEDwidth, myOLEDheight);
+
+// I2C settings
+const uint16_t SPEED = 100;
+const uint8_t CLK_PIN = 1;
+const uint8_t DATA_PIN = 0;
+
+// ===================== Function Space =====================
+void setupDisplay()
+{
+    busy_wait_ms(500);
+    printf("Start!\r\n");
+    while (myOLED.OLEDbegin(SSD1315::SSD1315_ADDR, i2c0, SPEED, DATA_PIN, CLK_PIN) != DisplayRet::Success)
+    {
+        printf("SetupTest ERROR : Failed to initialize OLED!\r\n");
+        busy_wait_ms(1500);
+    } // initialize the OLED
+    if (myOLED.OLEDSetBufferPtr(myOLEDwidth, myOLEDheight, screenBuffer) != DisplayRet::Success)
+    {
+        printf("SetupTest : ERROR : OLEDSetBufferPtr Failed!\r\n");
+        while (1)
+        {
+            busy_wait_ms(1000);
+        }
+    } // Initialize the buffer
+    myOLED.OLEDFillScreen(0xF0, 0); // splash screen bars
+    busy_wait_ms(1000);
+}
+
+void updateDisplay(bool wifi_status, int32_t weight)
+{
+    // Clears the screen buffer and sets the font to default
+    myOLED.OLEDclearBuffer();
+    myOLED.setFont(pFontDefault);
+
+    // Display the current date and time on the OLED
+    datetime_t now;
+    rtc_get_datetime(&now);
+    myOLED.setCursor(0, 0);
+    myOLED.print(now.year);
+    myOLED.print("-");
+    myOLED.print(now.month);
+    myOLED.print("-");
+    myOLED.print(now.day);
+    myOLED.print(" ");
+    myOLED.print(now.hour);
+    myOLED.print(":");
+    myOLED.print(now.min);
+    myOLED.print(":");
+    myOLED.print(now.sec);
+
+    // Display the Wi-Fi status icon on the OLED
+    if (wifi_status)
+    {
+        myOLED.OLEDBitmap(112, 0, 16, 16, wifi_icon16x16, false);
+    }
+    else
+    {
+        myOLED.OLEDBitmap(112, 0, 16, 16, nowifi_icon16x16, false);
+    }
+
+    // Display the portion size and dispensing status on the OLED
+    myOLED.setCursor(0, 16);
+    myOLED.print("Portion: ");
+    myOLED.print(portion_size);
+    myOLED.print(" g");
+    myOLED.setCursor(0, 32);
+    if (feed_triggered)
+    {
+        myOLED.print("Dispensing...");
+        myOLED.setCursor(0, 48);
+        myOLED.print("Weight: ");
+        myOLED.print(weight);
+    }
+    else
+    {
+        myOLED.print("Idle");
+    }
+
+    // Update the OLED display with the latest information
+    myOLED.OLEDupdate();
+}
+
+// ---------------------------------------------------------
+// RTC and SNTP
+// ---------------------------------------------------------
+
+// Forward declarations
+extern "C" void set_rtc_from_ntp(uint32_t seconds);
+bool is_central_daylight_time(struct tm *utc);
+
+// Returns true if the given UTC time is currently in CDT (UTC-5)
+// Returns false if in CST (UTC-6)
+bool is_central_daylight_time(struct tm *utc)
+{
+    int month = utc->tm_mon + 1; // tm_mon is 0-11, convert to 1-12
+
+    // Months fully outside DST
+    if (month < 3 || month > 11)
+        return false; // Nov-Feb = CST
+    if (month > 3 && month < 11)
+        return true; // Apr-Oct = CDT
+
+    // March — DST starts second Sunday at 2:00 AM UTC (8:00 AM CST)
+    if (month == 3)
+    {
+        // Find day of month of first Sunday in March
+        // tm_wday is 0=Sunday, tm_mday is current day
+        // First Sunday = current day minus current weekday
+        int first_sunday = utc->tm_mday - utc->tm_wday;
+        if (first_sunday <= 0)
+            first_sunday += 7;
+
+        // Second Sunday = first Sunday + 7
+        int second_sunday = first_sunday + 7;
+
+        // Before second Sunday = CST
+        if (utc->tm_mday < second_sunday)
+            return false;
+
+        // On second Sunday, DST starts at 2:00 AM local (8:00 AM UTC)
+        if (utc->tm_mday == second_sunday)
+            return utc->tm_hour >= 8;
+
+        // After second Sunday = CDT
+        return true;
+    }
+
+    // November — DST ends first Sunday at 2:00 AM local (7:00 AM UTC)
+    if (month == 11)
+    {
+        // Find first Sunday in November
+        int first_sunday = utc->tm_mday - utc->tm_wday;
+        if (first_sunday <= 0)
+            first_sunday += 7;
+
+        // Before first Sunday = CDT
+        if (utc->tm_mday < first_sunday)
+            return true;
+
+        // On first Sunday, DST ends at 2:00 AM local (7:00 AM UTC)
+        if (utc->tm_mday == first_sunday)
+            return utc->tm_hour < 7;
+
+        // After first Sunday = CST
+        return false;
+    }
+
+    return false;
+}
+
+// Called by lwIP SNTP client when time is received from NTP server
+extern "C" void set_rtc_from_ntp(uint32_t seconds)
+{
+    time_t unix_time = (time_t)seconds;
+    struct tm *utc = gmtime(&unix_time);
+
+    // Determine offset based on DST
+    int offset = is_central_daylight_time(utc) ? -5 : -6;
+
+    // Apply offset to get local hour
+    // The +24 and %24 handle midnight wraparound correctly
+    int local_hour = (utc->tm_hour + offset + 24) % 24;
+
+    // Handle day rollover if offset pushes us into previous day
+    int local_day = utc->tm_mday;
+    if (utc->tm_hour + offset < 0)
+        local_day -= 1;
+
+    datetime_t t = {
+        .year = (int16_t)(utc->tm_year + 1900),
+        .month = (int8_t)(utc->tm_mon + 1),
+        .day = (int8_t)local_day,
+        .dotw = (int8_t)(utc->tm_wday),
+        .hour = (int8_t)local_hour,
+        .min = (int8_t)(utc->tm_min),
+        .sec = (int8_t)(utc->tm_sec)};
+
+    rtc_set_datetime(&t);
+
+    printf("RTC synced: %04d-%02d-%02d %02d:%02d:%02d %s\n",
+           t.year, t.month, t.day, t.hour, t.min, t.sec,
+           is_central_daylight_time(utc) ? "CDT" : "CST");
+}
+
+// NTP initialization function
+void ntp_init()
+{
+    rtc_init();
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_init();
+    printf("NTP client started.\n");
+}
+
+// ---------------------------------------------------------
+// Core 1 Main
+// ---------------------------------------------------------
 void core1_main()
 {
-    
 
     // Initialize the HX711 load cell amplifier and set it up to read values from the load cell
     hx711_setup();
 
-    
-
     // Runs first reading and sets it to false to start taking EMA readings.
     hx711_read_EMA();
-    first_reading = false;
 
+    // OLED Display Setup
+    setupDisplay();
+
+    bool connected_to_wifi = false; // Initialize wifi status variable
     while (true)
     {
         hx711_read_EMA();
@@ -229,10 +495,31 @@ void core1_main()
             dispenseFood();
             feed_triggered = false;
         }
+
+        // Reads from FIFO to know if still connected to Wifi
+        // This block is to allow core1 to see connection status from core0
+        if (multicore_fifo_rvalid())
+        {
+            uint8_t wifi_status = multicore_fifo_pop_blocking();
+            if (wifi_status == 0) // If wifi is disconnectred
+            {
+                connected_to_wifi = false;
+            }
+            else
+            { // If wifi is connected
+                connected_to_wifi = true;
+            }
+        }
+
+        updateDisplay(connected_to_wifi, 0); // Update the OLED display with the latest information
+
         sleep_ms(100); // Sleeps sets core1 to check for triggers every 100ms
     }
 }
 
+// ---------------------------------------------------------
+// Core 0 Main
+// ---------------------------------------------------------
 int main()
 {
     stdio_init_all();
@@ -274,15 +561,13 @@ int main()
     ssi_init();
     printf("SSI Handler initialized.\n");
 
-    // Create an array to hold the 6 bytes of the MAC address
-    uint8_t mac[6];
+    // After Wi-Fi connects and httpd_init:
+    ntp_init();
+    printf("NTP initialized.\n");
 
-    // Pull the MAC address from the Wi-Fi chip in Station Mode (STA)
-    cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA, mac);
-
-    // Print it to your serial console
-    printf("Pico W MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    datetime_t now;
+    rtc_get_datetime(&now);
+    printf("Current core 0 RTC time: %04d-%02d-%02d %02d:%02d:%02d\n", now.year, now.month, now.day, now.hour, now.min, now.sec);
 
     // Initialize and Configure gpio MOTOR_PIN
     gpio_init(MOTOR_PIN);
@@ -291,10 +576,20 @@ int main()
 
     multicore_launch_core1(core1_main); // Launch core 1 to run the HX711 reading loop
 
-
     // Loop that just prints hello world and blinks the on-board LED every second
     while (true)
     {
+        // Checks Wifi Connection status and pushes a status flag to FIFO
+        // This block is to allow core1 to see connection status from core0
+        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
+        {
+            multicore_fifo_push_blocking(1); // 1 = Connected
+        }
+        else
+        {
+            multicore_fifo_push_blocking(0); // 0 = Disconnected
+        }
+
         cyw43_arch_poll();                                       // Service the Wi-Fi driver
         cyw43_arch_wait_for_work_until(make_timeout_time_ms(1)); // Yield briefly
     }

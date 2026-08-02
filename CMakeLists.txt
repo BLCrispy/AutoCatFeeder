@@ -3,7 +3,9 @@
 cmake_minimum_required(VERSION 3.13)
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
+# Require C++20 standard
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Initialise pico_sdk from installed location
@@ -44,6 +46,22 @@ add_executable(AutoCatFeeder
     AutoCatFeeder.cpp
 )
 
+add_library(pico_displaylib INTERFACE)
+
+target_sources(pico_displaylib INTERFACE
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/nokia5110.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/sh110x.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/ssd1306.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/ch1115.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/erm19264.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/ssd1315.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/display_graphics.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/display_print.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/displaylib_1bit_PICO/src/displaylib/display_fonts.cpp
+)
+
+
+
 pico_set_program_name(AutoCatFeeder "AutoCatFeeder")
 pico_set_program_version(AutoCatFeeder "0.1")
 
@@ -58,10 +76,14 @@ target_link_libraries(AutoCatFeeder
 # Add submodules to my project
 add_subdirectory(extern/hx711-pico-c)
 
+
+
 # Add the standard include files to the build
 target_include_directories(AutoCatFeeder PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         extern/hx711-pico-c/include
+        ${CMAKE_CURRENT_LIST_DIR}
+        extern/displaylib_1bit_PICO/include
 )
 
 # Add any user requested libraries
@@ -71,6 +93,14 @@ target_link_libraries(AutoCatFeeder
         pico_stdlib
         hx711-pico-c
         pico_multicore
+        pico_stdlib 
+        hardware_spi 
+        hardware_i2c 
+        pico_displaylib
+        hardware_rtc
+        pico_lwip_sntp
+        hardware_pio
+        hardware_pwm
         )
 
 # Need to generate UF2 file for upload to RP2040

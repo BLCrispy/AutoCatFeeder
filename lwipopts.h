@@ -1,6 +1,20 @@
 // Common settings used in most of the pico_w examples
 // (see https://www.nongnu.org/lwip/2_1_x/group__lwip__opts.html for details)]
 
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+void set_rtc_from_ntp(uint32_t seconds);
+#ifdef __cplusplus
+}
+#endif
+
+#define SNTP_SERVER_DNS             1
+#define SNTP_UPDATE_DELAY           3600000
+#define SNTP_SET_SYSTEM_TIME_US(sec, us) set_rtc_from_ntp((uint32_t)(sec))
+
 // allow override in some examples
 #ifndef NO_SYS
 #define NO_SYS                      1
@@ -20,6 +34,7 @@
 #define MEMP_NUM_TCP_PCB            8
 #define MEMP_NUM_TCP_SEG            48
 #define MEMP_NUM_ARP_QUEUE          10
+#define MEMP_NUM_SYS_TIMEOUT        16
 #define PBUF_POOL_SIZE              32
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
@@ -91,9 +106,6 @@
 #define LWIP_HTTPD_CGI 1
 #define LWIP_HTTPD_SSI_INCLUDE_TAG 0
 #define HTTPD_FSDATA_FILE "htmldata.c"
-
-
-
 
 // Define your static parameters for Station (STA) Mode
 #define CYW43_DEFAULT_IP_STA_ADDRESS    LWIP_MAKEU32(192, 168, 86, 26)
