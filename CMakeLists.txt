@@ -75,6 +75,8 @@ target_link_libraries(AutoCatFeeder
 
 # Add submodules to my project
 add_subdirectory(extern/hx711-pico-c)
+add_subdirectory(extern/buzzer-pio)
+
 
 
 
@@ -84,6 +86,8 @@ target_include_directories(AutoCatFeeder PRIVATE
         extern/hx711-pico-c/include
         ${CMAKE_CURRENT_LIST_DIR}
         extern/displaylib_1bit_PICO/include
+        ${CMAKE_CURRENT_LIST_DIR}
+        extern/buzzer-pio/src
 )
 
 # Add any user requested libraries
@@ -101,6 +105,7 @@ target_link_libraries(AutoCatFeeder
         pico_lwip_sntp
         hardware_pio
         hardware_pwm
+        buzzer
         )
 
 # Need to generate UF2 file for upload to RP2040

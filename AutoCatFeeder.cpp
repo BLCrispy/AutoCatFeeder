@@ -18,6 +18,7 @@
 extern "C"
 {
 #include "extern/hx711-pico-c/include/common.h"
+#include "extern/buzzer-pio/src/buzzer.h"
 }
 
 // ---------------------------------------------------------
@@ -28,6 +29,7 @@ volatile bool feed_triggered = false;
 volatile bool first_reading = true;
 volatile int8_t portion_size = 40; // 40g default as that is what we feed our cats per meal usually
 volatile int32_t smoothed_value = 0;
+datetime_t last_dispensed;
 
 // =============== Function prototypes ================
 // SSI Handlers
@@ -44,11 +46,48 @@ void hx711_setup();
 void hx711_read_EMA();
 
 // Runs food dispensing logic
-void dispenseFood();
+void dispenseFood(bool &first_dispense, buzzer_t jingle_buzzer);
 
 // OLED Display Functions
 void SetupDisplay(void);
-void updateDisplay(bool wifi_status, int32_t weight);
+void updateDisplay(bool wifi_status, int32_t weight, bool &first_dispense);
+
+
+// ---------------------------------------------------------
+// Buzzer Code
+// ---------------------------------------------------------
+
+// Start up jingle for buzzer
+const NotePacket startup_jingle[] = {
+    MAKE_NOTE(NOTE_C6,  DUR_EIGHTH),
+    MAKE_NOTE(NOTE_E6,  DUR_EIGHTH),
+    MAKE_NOTE(NOTE_G6,  DUR_EIGHTH),
+    MAKE_NOTE(REST,     DUR_SIXTEENTH),
+    MAKE_NOTE(NOTE_C7,  DUR_QUARTER),
+};
+
+// McDonald's "I'm Lovin' It" full jingle
+// Ba - da - ba - ba - baaa ... I'm - lov - in' - it
+const NotePacket im_lovin_it_jingle[] = {
+    MAKE_NOTE(REST,    DUR_EIGHTH),   // little pickup breath before the riff
+
+    // "Ba-da-ba-ba-baaa" bell riff
+    MAKE_NOTE(NOTE_G6,  DUR_EIGHTH),  // "Ba"
+    MAKE_NOTE(NOTE_A6,  DUR_EIGHTH),  // "da"
+    MAKE_NOTE(NOTE_G6,  DUR_EIGHTH),  // "ba"
+    MAKE_NOTE(NOTE_E6,  DUR_EIGHTH),  // "ba"
+    MAKE_NOTE(NOTE_C6,  DUR_QUARTER), // "baaa" (held, shortened a touch to leave room for the tag)
+
+    MAKE_NOTE(REST,     DUR_SIXTEENTH), // tiny breath before the vocal tag
+
+    // "I'm - lov - in' - it" vocal tag
+    MAKE_NOTE(NOTE_C6,  DUR_EIGHTH),  // "I'm"
+    MAKE_NOTE(NOTE_D6,  DUR_EIGHTH),  // "lov-"
+    MAKE_NOTE(NOTE_E6,  DUR_EIGHTH),  // "-in'"
+    MAKE_NOTE(NOTE_C6,  DUR_QUARTER), // "it" (resolves back down to the tonic)
+};
+
+const size_t im_lovin_it_jingle_len = sizeof(im_lovin_it_jingle) / sizeof(NotePacket);
 
 // ---------------------------------------------------------
 // SSI Handler
@@ -217,7 +256,7 @@ void hx711_read_EMA()
 // Runs food dispensing logic
 #define CALIBRATION_FACTOR 440 // Calibration factor to convert raw sensor values to grams
 #define MOTOR_PIN 2            // GPIO pin connected to SONGLE Relay Pin to send triggers to motor
-void dispenseFood()
+void dispenseFood(bool &first_dispense, buzzer_t jingle_buzzer)
 {
     // Minimum dispense time in milliseconds based on portion size (40g takes 8 seconds)
     // This scales dispense time based on portion size, and was calibrated from 40g feedings taking 8 seconds to dispense
@@ -227,7 +266,11 @@ void dispenseFood()
 
     int32_t tare = smoothed_value; // Set the tare to the current weight before dispensing
 
-    gpio_put(MOTOR_PIN, 0); // Turn motor on to start dispensing food      
+    gpio_put(MOTOR_PIN, 0); // Turn motor on to start dispensing food  
+    
+    // Play the "I'm Lovin' It" jingle on the buzzer while dispensing food
+    size_t total_notes = sizeof(im_lovin_it_jingle) / sizeof(NotePacket);
+    buzzer_play(&jingle_buzzer, im_lovin_it_jingle, total_notes);
 
 
     // Dispenses food until the target weight of food has been met
@@ -238,7 +281,7 @@ void dispenseFood()
         printf("Dispensing... Current weight: %li g\n", (smoothed_value - tare) / CALIBRATION_FACTOR);
 
                                              
-        updateDisplay(true, (smoothed_value - tare) / CALIBRATION_FACTOR); // Update the OLED display with the latest information
+        updateDisplay(true, ((smoothed_value - tare) / CALIBRATION_FACTOR), first_dispense);                                                   // Update the OLED display with the latest information
 
         // Records the time elapsed since dispensing started and checks if the minimum dispense time has been met
         min_time_met = absolute_time_diff_us(dispense_start, get_absolute_time()) >= ((int64_t)min_dispense_ms * 1000);
@@ -263,6 +306,11 @@ void dispenseFood()
         smoothed_value = fresh_raw_baseline; // Reset the smoothed value to the new baseline after dispensing
         printf("Post-dispense raw baseline: %li\n", fresh_raw_baseline);
     }
+
+    if (first_dispense) {
+        first_dispense = false; // Set first_dispense to false after the first dispense has completed
+    }
+    
 }
 
 // ---------------------------------------------------------
@@ -305,7 +353,7 @@ void setupDisplay()
     busy_wait_ms(1000);
 }
 
-void updateDisplay(bool wifi_status, int32_t weight)
+void updateDisplay(bool wifi_status, int32_t weight, bool &first_dispense)
 {
     // Clears the screen buffer and sets the font to default
     myOLED.OLEDclearBuffer();
@@ -343,16 +391,37 @@ void updateDisplay(bool wifi_status, int32_t weight)
     myOLED.print(portion_size);
     myOLED.print(" g");
     myOLED.setCursor(0, 32);
+
+    
+
     if (feed_triggered)
     {
         myOLED.print("Dispensing...");
         myOLED.setCursor(0, 48);
         myOLED.print("Weight: ");
         myOLED.print(weight);
+        rtc_get_datetime(&last_dispensed);
     }
-    else
+    else if (!first_dispense)
     {
-        myOLED.print("Idle");
+        myOLED.print("Last Dispensed:");
+        myOLED.setCursor(0, 48);
+        myOLED.print(last_dispensed.year);
+        myOLED.print("-");
+        myOLED.print(last_dispensed.month);
+        myOLED.print("-");
+        myOLED.print(last_dispensed.day);
+        myOLED.print(" ");
+        myOLED.print(last_dispensed.hour);
+        myOLED.print(":");
+        myOLED.print(last_dispensed.min);
+        myOLED.print(":");
+        myOLED.print(last_dispensed.sec);
+    }
+    else {
+        myOLED.print("Last Dispensed:");
+        myOLED.setCursor(0, 48);
+        myOLED.print("N/A");
     }
 
     // Update the OLED display with the latest information
@@ -470,11 +539,15 @@ void ntp_init()
     printf("NTP client started.\n");
 }
 
+
 // ---------------------------------------------------------
 // Core 1 Main
 // ---------------------------------------------------------
 void core1_main()
 {
+
+    bool first_dispense = true; // Flag to indicate if this is the first boot of core 1
+    
 
     // Initialize the HX711 load cell amplifier and set it up to read values from the load cell
     hx711_setup();
@@ -482,8 +555,20 @@ void core1_main()
     // Runs first reading and sets it to false to start taking EMA readings.
     hx711_read_EMA();
 
+    // Buzzer Initialization and play startup jingle
+    buzzer_t jingle_buzzer;
+    if (!buzzer_init(&jingle_buzzer, pio0, 13)) // Initialize buzzer on PIO0, pin 13
+    {
+        printf("Failed to init buzzer (no free state machine or DMA channel)\n");
+    }
+
+    size_t total_notes = sizeof(startup_jingle) / sizeof(NotePacket);
+    buzzer_play(&jingle_buzzer, startup_jingle, total_notes);
+    
     // OLED Display Setup
     setupDisplay();
+
+    
 
     bool connected_to_wifi = false; // Initialize wifi status variable
     while (true)
@@ -492,7 +577,7 @@ void core1_main()
         // Core 1 watches for trigger set by cgi_feed_handler in core0 to run dispense food action then reset trigger
         if (feed_triggered)
         {
-            dispenseFood();
+            dispenseFood(first_dispense, jingle_buzzer);
             feed_triggered = false;
         }
 
@@ -511,7 +596,7 @@ void core1_main()
             }
         }
 
-        updateDisplay(connected_to_wifi, 0); // Update the OLED display with the latest information
+        updateDisplay(connected_to_wifi, 0, first_dispense); // Update the OLED display with the latest information
 
         sleep_ms(100); // Sleeps sets core1 to check for triggers every 100ms
     }

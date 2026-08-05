@@ -4,3 +4,6 @@
 [submodule "extern/displaylib_1bit_PICO"]
 	path = extern/displaylib_1bit_PICO
 	url = https://github.com/gavinlyonsrepo/displaylib_1bit_PICO
+[submodule "extern/buzzer-pio"]
+	path = extern/buzzer-pio
+	url = https://github.com/BLCrispy/buzzer-pio
