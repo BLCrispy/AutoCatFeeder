@@ -281,7 +281,7 @@ void dispenseFood(bool &first_dispense, buzzer_t jingle_buzzer)
         printf("Dispensing... Current weight: %li g\n", (smoothed_value - tare) / CALIBRATION_FACTOR);
 
                                              
-        updateDisplay(true, ((smoothed_value - tare) / CALIBRATION_FACTOR), first_dispense);                                                   // Update the OLED display with the latest information
+        updateDisplay(true, ((smoothed_value - tare) / CALIBRATION_FACTOR), first_dispense);  // Update the OLED display with the latest information
 
         // Records the time elapsed since dispensing started and checks if the minimum dispense time has been met
         min_time_met = absolute_time_diff_us(dispense_start, get_absolute_time()) >= ((int64_t)min_dispense_ms * 1000);
